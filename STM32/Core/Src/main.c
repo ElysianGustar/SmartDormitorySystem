@@ -80,6 +80,8 @@ Key_ID key;
 uint8_t need_reconnect = 0;
 uint32_t lastReconnTick = 0;
 uint32_t lastPingTick = 0;
+uint8_t buzzer_enable = 0;		/* 本地按键 / 远程 led 共用的蜂鸣器开关 */
+uint8_t fan_enable = 0;			/* 本地按键控制的风扇开关 */
 
 /* USER CODE END PV */
 
@@ -106,13 +108,19 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
     }		
 }
 
-// 获取烟雾数据
+// 获取烟雾数据(多次采样取平均,MQ-2 输出噪声大)
+#define SMOKE_ADC_SAMPLES	16
+#define SMOKE_ALARM_THRESHOLD	25	/* 烟雾报警阈值(百分比) */
+
 int Get_ADC_Value(ADC_HandleTypeDef *hadc) {
-    int adc_value = 0;
-    HAL_ADC_Start(hadc);
-    HAL_ADC_PollForConversion(hadc, 1);
-    adc_value = HAL_ADC_GetValue(hadc)* 100.0f / 4096;
-    return adc_value;
+    uint32_t sum = 0;
+    uint8_t i;
+    for(i = 0; i < SMOKE_ADC_SAMPLES; i++) {
+        HAL_ADC_Start(hadc);
+        if(HAL_ADC_PollForConversion(hadc, 1) == HAL_OK)
+            sum += HAL_ADC_GetValue(hadc);
+    }
+    return (int)(sum * 100.0f / (4096 * SMOKE_ADC_SAMPLES));
 }
 
 
@@ -189,18 +197,24 @@ int main(void)
     lastPingTick = HAL_GetTick();
     while (1)
     {
-        /* 按键控制蜂鸣器 */
-        if(HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_14) == GPIO_PIN_RESET) {
-            HAL_GPIO_WritePin(GPIOB, GPIO_PIN_10, GPIO_PIN_SET);  // 蜂鸣器响
-        } else {
-            HAL_GPIO_WritePin(GPIOB, GPIO_PIN_10, GPIO_PIN_RESET);  // 蜂鸣器不响
+        /* 按键处理(状态机+消抖):短按切换,长按1.2s关闭 */
+        key = Key_Scan(1200);
+        switch(key)
+        {
+            case KEY_1:      buzzer_enable = !buzzer_enable; break;
+            case KEY_2:      fan_enable = !fan_enable;       break;
+            case KEY_LONG_1: buzzer_enable = 0;              break;
+            case KEY_LONG_2: fan_enable = 0;                 break;
+            default:                                         break;
         }
-		
-		if(HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_15) == GPIO_PIN_RESET) {
-            HS_F04A_Ctrl(MOTOR_FORWARD);
-        } else {
-            HS_F04A_Ctrl(MOTOR_STOP);
-        }
+
+        /* 蜂鸣器仲裁:烟雾报警 > 用户开关(本地按键 / 远程led) */
+        if(smoke_value >= SMOKE_ALARM_THRESHOLD)
+            HAL_GPIO_WritePin(GPIOB, GPIO_PIN_10, GPIO_PIN_SET);
+        else
+            HAL_GPIO_WritePin(GPIOB, GPIO_PIN_10, buzzer_enable ? GPIO_PIN_SET : GPIO_PIN_RESET);
+
+        HS_F04A_Ctrl(fan_enable ? MOTOR_FORWARD : MOTOR_STOP);
 
         /* 轮询 OneNET 下发数据(命令 / 物模型属性设置) */
         if(ESP8266_WaitRecive() == REV_OK)
@@ -237,12 +251,6 @@ int main(void)
             if(DHT11_Read_Data(&temp, &humi) == 0) {    // 读取温度、湿度值
                 smoke_value = Get_ADC_Value(&hadc1);     // 读取烟雾传感器值
 				
-				if (smoke_value >= 25) {
-					HAL_GPIO_WritePin(GPIOB, GPIO_PIN_10, GPIO_PIN_SET);  // 蜂鸣器响
-				} else {
-					HAL_GPIO_WritePin(GPIOB, GPIO_PIN_10, GPIO_PIN_RESET);  // 蜂鸣器不响
-				}
-				
                 /* OLED显示数据 */
                 OLED_Clear();
                 OLED_ShowString(1, 1, "Temp:");
@@ -255,7 +263,7 @@ int main(void)
                 
                 OLED_ShowString(3, 1, "Smoke:");
                 OLED_ShowNum(3, 8, smoke_value, 3);
-                OLED_ShowString(3, 12, "ppm");
+                OLED_ShowString(3, 12, "%");
                 
                 OneNet_SendData();
                 printf("temp: %d, humi: %d, smoke: %d\r\n", temp, humi, smoke_value);

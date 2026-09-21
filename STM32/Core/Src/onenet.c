@@ -5,20 +5,19 @@
 #include "mqttkit.h"
 
 //硬件驱动
-//#include "usart.h"
-//#include "delay.h"
-//#include "led.h"
 #include "main.h"
 #include "net_config.h"
 #include "dht11.h"
 //C库
 #include <string.h>
 #include <stdio.h>
+#include <stdlib.h>
 
 
 extern unsigned char esp8266_buf[128];
 extern uint8_t temp, humi;
 extern int smoke_value;
+extern uint8_t buzzer_enable;
 
 //==========================================================
 //	函数名称：	OneNet_DevLink
@@ -107,103 +106,6 @@ unsigned char OneNet_FillBuf(char *buf)
 
 }
 
-//unsigned char OneNet_FillBuf_Temp(char *buf)
-//{
-//    char text[48];
-
-//    memset(text, 0, sizeof(text));
-
-//    strcpy(buf, "{\"id\":\"123\",\"params\":{");
-
-//    memset(text, 0, sizeof(text));
-//    sprintf(text, "\"humi\":{\"value\":%d}", Data[0]);
-//    strcat(buf, text);
-
-//    strcat(buf, "}}");
-
-//    return strlen(buf);
-//}
-
-//unsigned char OneNet_FillBuf_Light(char *buf)
-//{
-//    char text[48];
-
-//    memset(text, 0, sizeof(text));
-
-//    strcpy(buf, "{\"id\":\"123\",\"params\":{");
-
-//    memset(text, 0, sizeof(text));
-//    sprintf(text, "\"humi\":{\"value\":%d}", Data[0]);
-//    strcat(buf, text);
-
-//    strcat(buf, "}}");
-
-//    return strlen(buf);
-//}
-
-
-//unsigned char OneNet_FillBufll_Buf_MQ2(char *buf)
-//{
-//    char text[48];
-
-//    memset(text, 0, sizeof(text));
-
-//    strcpy(buf, "{\"id\":\"123\",\"params\":{");
-
-//    memset(text, 0, sizeof(text));
-//    sprintf(text, "\"humi\":{\"value\":%d}", Data[0]);
-//    strcat(buf, text);
-
-//    strcat(buf, "}}");
-
-//    return strlen(buf);
-//}
-
-
-//==========================================================
-//	函数名称：	OneNet_SendData
-//
-//	函数功能：	上传数据到平台
-//
-//	入口参数：	type：发送数据的格式
-//
-//	返回参数：	无
-//
-//	说明：		
-//==========================================================
- 
-//void OneNet_SendData_Humi(void)
-//{
-
-//    MQTT_PACKET_STRUCTURE mqttPacket = {NULL, 0, 0, 0};                                                //协议包
-
-//    char buf[256];
-
-//    short body_len = 0, i = 0;
-
-//    printf("Tips:  OneNet_SendData-Humi-MQTT\r\n");
-
-//    memset(buf, 0, sizeof(buf));
-
-//    body_len = OneNet_FillBuf_Humi(buf);                                                                 //获取当前需要发送的数据流的总长度
-
-//    if (body_len)
-//    {
-//        if (MQTT_PacketSaveData(DEVID, body_len, NULL, 5, &mqttPacket) == 0)                         //封包
-//        {
-//            for (; i < body_len; i++)
-//                mqttPacket._data[mqttPacket._len++] = buf[i];
-
-//            ESP8266_SendData(mqttPacket._data, mqttPacket._len);                                     //上传数据到平台
-//            printf("Send %d Bytes\r\n", mqttPacket._len);
-
-//            MQTT_DeleteBuffer(&mqttPacket);                                                         //删包
-//        }
-//        else
-//            printf("WARN:  EDP_NewBuffer Failed\r\n");
-//    }
-
-//}
 void OneNet_SendData(void)
 {
 	
@@ -228,7 +130,6 @@ void OneNet_SendData(void)
 		    		mqttPacket._data[mqttPacket._len++] = buf[i];
 			}
 				
-//			printf("%s\r\n",mqttPacket._data);
 			ESP8266_SendData(mqttPacket._data, mqttPacket._len);									//上传数据到平台
 			printf("Send %d Bytes\r\n", mqttPacket._len);
 			
@@ -300,7 +201,7 @@ static void OneNet_ExecCommand(const char *payload)
 	led = OneNet_ParseJsonProp(payload, "led");
 	if(led >= 0)
 	{
-		HAL_GPIO_WritePin(GPIOB, GPIO_PIN_10, led ? GPIO_PIN_SET : GPIO_PIN_RESET);
+		buzzer_enable = (uint8_t)(led ? 1 : 0);		//与本地按键共用同一个蜂鸣器开关,避免互相覆盖
 		printf("Remote Set led = %d\r\n", led);
 	}
 }

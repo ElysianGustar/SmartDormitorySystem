@@ -220,3 +220,23 @@ SmartDormitorySystem/
 |---------|------|
 | 已入库的 `unpackage/`(81 个构建产物)与 `STM32/MDK-ARM/road/`(Keil 输出)通过 `git rm --cached` 移出索引,新产物由 `.gitignore` 拦截 | `APP程序/unpackage/`、`STM32/MDK-ARM/` |
 | 清理 `Data[5]`、`a_esp_buf` 等从未定义/引用的遗留 extern 声明 | `onenet.c`、`main.c` |
+
+### P1 — 稳定性(已修复 3、5 项)
+
+| # | 修复内容 | 位置 |
+|---|---------|------|
+| 3 | `DHT11_Read_Data` 时序读取置于 `__disable_irq/__enable_irq` 临界区,读取后丢弃 USART2 积压字节并清除 ORE 标志,避免 USART2 接收中断破坏微秒时序且不破坏 ESP8266 接收状态 | `Dht11.c` |
+| 5 | 烟雾 ADC 多次采样取平均(16 次)+ 采样时间提到 239.5 周期;**单位统一为百分比**("ppm" 实为 `adc*100/4096`),OLED 与 APP 显示改为 `%` | `main.c`、`adc.c`、`index.vue` |
+
+### P2 — 安全(已修复第 3 项)
+
+| 修复内容 | 位置 |
+|---------|------|
+| Android 权限裁剪:CAMERA、READ_PHONE_STATE、GET_ACCOUNTS、WRITE_SETTINGS、FLASHLIGHT、READ_LOGS 等 11 项无关权限移除,仅保留网络相关 4 项 | `manifest.json` |
+
+### P3 — 死代码清理
+
+| 修复内容 | 位置 |
+|---------|------|
+| 删除 `onenet.c` 注释掉的旧函数(`OneNet_FillBuf_Temp/Light/MQ2`、`OneNet_SendData_Humi` 等) | `onenet.c` |
+| 本地按键接入 `key.c` 状态机(短按切换、长按 1.2s 关闭),蜂鸣器仲裁统一为**烟雾报警 > 用户开关(buzzer_enable,本地按键与远程 led 共用)**,解决双方覆盖控制 | `main.c`、`onenet.c` |

@@ -48,7 +48,7 @@
 			        <image class="dev-logo" src="../../static/meteocons_extreme-smoke-fill.png" mode=""></image>
 			    </view>
 			    <!-- 显示湿度数据 -->
-			    <view class="dev-data">{{MQ2}}ppm</view>
+			    <view class="dev-data">{{MQ2}}%</view>
 			</view>
 		
 			<!-- 远程控制卡片:开关下发 led 属性(设备端映射为蜂鸣器 PB10) -->
