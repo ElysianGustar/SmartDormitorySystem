@@ -175,15 +175,81 @@ SmartDormitorySystem/
 | 2 | 宏污染 | `STM32/Core/Src/HS_F04A.c:8` | `#define GPIO_Port GPIOB` 等通用名宏极易与 HAL 定义冲突。建议:改用带模块前缀的命名(如 `HS_F04A_GPIO_PORT`) |
 | 3 | OLED 全屏清屏重绘 | `main.c` + `STM32/Core/Src/OLED.c` | 每秒 `OLED_Clear()` 后全量重画,屏幕会闪烁。建议:只更新变化区域 |
 | 4 | 配置散落 | APP 端 URL、product_id、设备名在多个文件重复硬编码 | 建议:提取统一的 config 模块管理 |
-| 5 | 构建产物入库 | `APP程序/unpackage/`(含 APK)、`.idea/` | 不应进版本库。建议:补充 `.gitignore` |
+| 5 | 构建产物入库 | `APP程序/unpackage/`(实测 51MB,含 3 个 APK 约 46MB)、`.idea/` | 不应进版本库,且仓库当前没有 `.gitignore`。建议:补充 `.gitignore` 并清理已入库产物 |
 | 6 | 无测试 / CI | `STM32/Core/Src/MqttKit.c`(1352 行自实现 MQTT 编解码) | 协议编解码完全无单元测试,出错代价高。建议:在 PC 环境编写解码单元测试,并建立 CI |
+
+### 补充新发现（二次走查，尚未修改）
+
+> 说明:以下为在既有 P0-P3 之外新发现的问题,标 "需硬件确认" 的项需要先对照原理图/实物接线后再改代码。
+
+| # | 问题 | 位置 | 说明与建议 |
+|---|------|------|-----------|
+| N1 | ADC 采样引脚配置不一致(需硬件确认) | `STM32/road.ioc` vs `STM32/Core/Src/adc.c` vs `STM32/Core/Src/main.c:132/206` | `.ioc` 配置为 `ADC1_IN4(PA4)`、`ADC2_IN6(PA6)`;但 `adc.c` 实际生成的是 `ADC1 channel1(PA1)`、`ADC2 channel4(PA4)`,且 `main.c` 只调用 `MX_ADC1_Init()` 并读 `hadc1`。当前代码实际采的是 **PA1**,若 MQ-2 接在 PA4/PA6,烟雾值会不可信。建议:确认 MQ-2 实际引脚后,统一 `.ioc`、生成代码与 `main.c` 的采样通道 |
+| N2 | ADC 时钟超规格 | `STM32/Core/Src/main.c:279` | 当前 `RCC_ADCPCLK2_DIV2`,APB2=72MHz 时 ADCCLK=36MHz,超过 STM32F103 ADC 最大 14MHz;`.ioc` 中本为 `RCC_ADCPCLK2_DIV6`(12MHz),说明 CubeMX 配置与生成代码不同步。建议:改为不超过 14MHz 的分频并重新核对采样时间 |
+| N3 | DHT11 校验和可能误杀合法帧 | `STM32/Core/Src/Dht11.c:181` | `buf[0]+buf[1]+buf[2]+buf[3] == buf[4]` 未取低 8 位;DHT11 校验和为 sum 的低 8 位,当前和超过 255 时会把合法数据判失败。建议:改为 `((buf[0]+buf[1]+buf[2]+buf[3]) & 0xFF) == buf[4]` |
+| N4 | 按键上下拉配置与按下电平逻辑矛盾(需硬件确认) | `STM32/Core/Src/key.c:14`、`STM32/Core/Src/main.c:185/191` | `Key_Init()` 使用 `GPIO_PULLDOWN`,注释却写"按键接 GND";`main.c` 又把 `GPIO_PIN_RESET` 当按下。若按键按下接地,通常应使用上拉输入;当前配置可能一直误判按下或无法稳定检测。建议:按原理图确认按键接法,统一上下拉与有效电平 |
+| N5 | APP token 生成依赖 Node `crypto`/`Buffer`,且固定一年有效 | `APP程序/key.js:1/4/8`、`APP程序/pages/index/index.vue:88-97` | uni-app 真机/小程序环境不一定存在 Node 内置 `crypto`/`Buffer`;`et` 固定为当前时间 +365 天,过期后无续期/重签/鉴权失败处理。建议:token 由自有后端签发,或前端改用纯 JS HMAC-SHA1,并处理 401/过期重建 |
+| N6 | APP 未检查 OneNET 业务错误,折线图页无失败处理 | `APP程序/pages/index/index.vue:118-133`、`APP程序/pages/LineChart/LineChart.vue:82-107` | 只处理 `uni.request` 网络层 `fail`,未检查 HTTP 状态码与 OneNET 返回的 `errno/error`,也未防御 `res.data.data` 为空;token 失效或设备不存在时可能直接取 `data[x].value` 异常。`LineChart.vue` 甚至没有 `fail` 回调。建议:统一封装 API 请求,先判断状态码/`errno`,再按 `identifier` 取数 |
+| N7 | MQTT 发布 topic 在协议层硬编码 | `STM32/Core/Src/MqttKit.c:8` | `#define str "$sys/xUHsdh4wh3/test/thing/property/post"` 与 `onenet.c` 的 `PROID/DEVID` 重复;只改 `onenet.c` 不改这里会把数据发到旧设备 topic。建议:发布 topic 由 `PROID/DEVID` 动态生成 |
+| N8 | 自实现 MQTT 解析器存在指针/长度隐患 | `STM32/Core/Src/MqttKit.c` | 例:`MQTT_UnPacketPublish()` 中 `strchr((int8 *)topic, '+')` 应为 `strchr(*topic, ...)`;`if(pkt_id == 0)` 应为 `if(*pkt_id == 0)`;多处 `MQTT_ReadLength()` 返回值未检查;`MQTT_UnPacketCmd()` 的 `remain_len - 44` 在畸形包下可能下溢。建议:补齐长度/指针校验,并为 `MqttKit.c` 增加 PC 端单元测试 |
+| N9 | QoS1 发布未确认 PUBACK,且发完即清空接收缓冲 | `STM32/Core/Src/MqttKit.c:432`、`STM32/Core/Src/main.c:228-230` | 数据发布使用 QoS1,服务器会回 PUBACK;当前未确认发布结果,`OneNet_SendData()` 后立即 `ESP8266_Clear()`,还可能清掉平台下发报文。建议:保留并解析接收缓冲,区分 PUBACK 与下发命令 |
+| N10 | 蜂鸣器有效电平注释与代码不一致(需硬件确认) | `STM32/Core/Src/gpio.c:54`、`STM32/Core/Src/main.c:186/209` | `gpio.c` 注释称 PB10 高电平"不响",`main.c` 却用 `GPIO_PIN_SET` 触发蜂鸣器。建议:确认有源/无源蜂鸣器及触发电平,统一宏定义 |
+| N11 | 启动时单独拉高 PB12,与风扇停止状态冲突 | `STM32/Core/Src/main.c:178-179`、`STM32/Core/Src/HS_F04A.c` | 风扇初始化后应为停止,`main.c` 又手动把 IN_A/PB12 拉高,可能造成上电瞬间风扇误动作。建议:删除该行的裸 GPIO 操作,风扇状态只由 `HS_F04A_Ctrl()` 管理 |
+| N12 | `Delay.c` 直接改写 SysTick,存在破坏 HAL tick 的风险 | `STM32/Core/Src/Delay.c` | `Delay_ms()/Delay_us()` 直接修改 `SysTick->LOAD/VAL/CTRL`,若被调用会影响 `HAL_GetTick()`、`HAL_Delay()` 及各类超时。当前 DHT11 未使用它,但建议删除或改为不破坏 HAL tick 的实现 |
+| N13 | 危险权限补充 | `APP程序/manifest.json:25-40` | 除已记录的权限过度问题外,还包含 `READ_LOGS`、`MOUNT_UNMOUNT_FILESYSTEMS` 等与本功能无关且敏感的权限。建议:裁剪到仅保留网络状态等必要权限 |
+| N14 | ESP8266 初始化/等待接口缺少超时边界 | `STM32/Core/Src/esp8266.c:197-250`、`ESP8266_GetIPD()` | `ESP8266_Init()` 对每个 AT 命令都是 `while(ESP8266_SendCmd(...))` 无限重试;`ESP8266_GetIPD(0)` 这类调用在 `do...while(timeOut--)` 下会下溢成超长等待。建议:增加最大重试次数与超时失败返回 |
+
+### 补充新发现（三次走查，尚未修改）
+
+> 说明:以下为对既有清单逐条复核(结论:28 项全部仍存在、零修复)之外新发现的问题,STM32 端 X 系列、APP 端 M 系列。另经实测确认:`unpackage/` 入库 51MB(3 个 APK 约 46MB),仓库无 `.gitignore`(已并入 P3-5)。
+
+#### STM32 端
+
+| # | 问题 | 位置 | 说明与建议 |
+|---|------|------|-----------|
+| X1 | 订阅函数从未调用,下行链路第二处断点 | `STM32/Core/Src/onenet.c:410` | `OneNET_Subscribe()` 定义后从未被调用(map 确认被剔除),即使修复 P0-1 轮询解析,设备也未订阅 `thing/property/set`。建议:MQTT 连接成功后调用订阅,与 P0-1 一并修复 |
+| X2 | DHT11 校验失败静默沿用旧值 | `STM32/Core/Src/Dht11.c:181-188` | 校验和失败无 `else` 分支,函数仍返回 0,temp/humi 保留上周期旧值却按成功上报/显示,故障无感知(与 N3 叠加)。建议:校验失败返回非 0,调用方据返回值决定上报策略 |
+| X3 | 无 UART 错误回调,接收通道可永久失效 | `STM32/Core/Src/main.c:93-104` | 仅实现 `HAL_UART_RxCpltCallback`,未实现 `HAL_UART_ErrorCallback`,USART2 发生 ORE/帧错误后 HAL 停止接收且无人重启。建议:实现错误回调,清除错误标志并重启 `HAL_UART_Receive_IT` |
+| X4 | ESP8266 接收变量缺 `volatile` 且无互斥 | `STM32/Core/Src/esp8266.c:18-19`、`main.c:97-102` | ISR 写 `esp8266_buf`/`esp8266_cnt`,主循环 `ESP8266_Clear()` 清零,无 `volatile` 无互斥,存在丢字节、索引错乱、strstr 扫描中被改写的竞态。建议:加 `volatile`,清零时短暂关中断或改双缓冲 |
+| X5 | 接收缓冲 128B 回绕 + `strstr` 越界读 | `main.c:73/97-100`、`esp8266.c:94` | 缓冲满时 `esp8266_cnt=0` 直接回绕致新旧帧混杂;缓冲全满无 NUL 结尾,`strstr` 越界读;AT 回显+IPD 突发易超 128B。建议:扩大缓冲、始终保证 NUL 结尾,或改环形队列 |
+| X6 | `OneNet_RevPro` PUBACK 分支空指针解引用 | `onenet.c:299-316` | PUBACK 分支不设置 `result=-1`,`req_payload` 仍为 NULL 即进入 `strchr(req_payload,':')`,P0-1 修复后立即变 HardFault。建议:进入解析前先判空 |
+| X7 | 全工程无看门狗 | `main.c:161/175`、`Error_Handler`、`ESP8266_Init` 重试环 | IWDG 未启用,而卡死点全是 `while(1)`,无人值守设备死机需现场断电。建议:启用 IWDG 并在主循环喂狗 |
+| X8 | `.ioc` 引脚缺失 + 用户代码写在生成区 | `STM32/road.ioc`、`gpio.c:54` | PB10(蜂鸣器)、PB13(风扇 IN_B)、PB14/15(按键)、PB11(DHT11)、PB6/7(OLED 电源)均不在 `.ioc` 中,且蜂鸣器初始电平写在 CubeMX 生成区(非 USER CODE 段),重新生成代码即静默丢失(比 N1/N2 范围更广)。建议:补齐 `.ioc` 配置,用户代码移入 USER CODE 段 |
+| X9 | `OneNet_FillBuf` 无长度检查 | `onenet.c:96-111/219` | 对 `buf[128]` 连续 `strcpy/strcat/sprintf`,当前约 90 字节侥幸安全,`smoke_value` 为 int 无范围约束,字段扩展或异常值即溢出。建议:改 `snprintf` 并检查剩余长度 |
+| X10 | `numBuf[10]` 数字解析无上限 | `onenet.c:322-326` | 按"连续数字"循环写入无上限,超长数字串溢出(latent,随 P0-1 修复激活)。建议:循环加写入上限 |
+| X11 | MqttKit payload 无界扫描 | `MqttKit.c:896` | `while(payload[data_len_t++] != '}')` 无界扫描,遇畸形数据越界读(latent,仅未被调用的 SaveBinData 分支触发)。建议:加长度边界 |
+| X12 | ADC 从未校准 | `adc.c` / `main.c` | F1 ADC 上电后未调用 `HAL_ADCEx_Calibration_Start`(map 显示被剔除),存在未校准偏移误差。建议:初始化后执行校准 |
+| X13 | 对未初始化的 `hadc2` 调中断处理 | `stm32f1xx_it.c:213` | `hadc2.Instance == NULL`,中断一旦触发即空指针解引用;且轮询模式下 `adc.c:136` 使能 ADC 中断本就多余。建议:移除该中断处理或初始化 hadc2 |
+| X14 | HAL 返回值普遍未检查 | `main.c:109-110`、`esp8266.c:84-105` 等 | `HAL_ADC_Start/PollForConversion` 超时则上报陈旧 DR 值;`RxCpltCallback` 里 `HAL_UART_Receive_IT` 重启失败被忽略;`ESP8266_SendCmd` 超时返回前不清缓冲,残留数据可致下一轮 `strstr` 误匹配旧关键字。建议:检查关键 HAL 调用返回值 |
+| X15 | 魔数遍布 | `main.c:199/208`、`esp8266.c:87`、`MqttKit.c:530-538`、`OLED.c` | `timeCount>=100`、烟雾阈值 25、`timeOut=200`、`37/36/44`、`0x78` 等均无命名常量。建议:提取为带语义的宏/常量 |
+| X16 | OLED 字库索引无范围检查 + GPIO 供电 | `OLED.c:164/15-19` | `OLED_F8x16[Char-' ']` 无字符范围检查(越界读);PB7/PB6 当 VDD/GND 给屏幕供电,GPIO 驱动能力受限且两引脚不在 `.ioc` 中。建议:加范围检查,供电改电源轨 |
+| X17 | DHT11 微秒延时下溢隐患 | `Dht11.c:53-75` | `DHT11_Delay_us` 硬编码 72MHz/72000,`udelay` 约 >1ms 时 `72000+startval-delays` 下溢成死等(当前最大调用 40us 未触发,latent)。建议:限制入参范围或改定时器实现 |
+| X18 | `ESP8266_IRQHandler` 死声明 | `main.c:91`、`esp8266.h:20` | 全工程无定义无调用,可并入 P3-1 清理 |
+
+#### APP 端
+
+| # | 问题 | 位置 | 说明与建议 |
+|---|------|------|-----------|
+| M1 | 图表数据未做数值转换 | `APP程序/pages/LineChart/LineChart.vue:6/101-102` | OneNET `value` 字段是 JSON 字符串,直接 push 进 series,uCharts 对字符串数据可能渲染异常/静默不画。建议:`Number()` 转换后再入列 |
+| M2 | 轮询无节流,弱网请求堆积 | `pages/index/index.vue:101`、`LineChart.vue:65` | 轮询周期 2s/3s 远小于 `uni.request` 默认 60s 超时,弱网/服务端挂起时请求大量并发堆积。建议:请求显式设置超时,加 in-flight 去重 |
+| M3 | 卡片跳转图表页不传参 | `index.vue:159-166`、`LineChart.vue:58` | 温/湿/烟雾三张卡片都跳同一图表页且不带参数,`onLoad(options)` 的 `options` 未使用,点"烟雾浓度"卡片看不到 MQ2 曲线。建议:跳转携带 `identifier` 参数,图表页按参数取数 |
+| M4 | token 明文持久化跨页传递 | `index.vue:161`、`LineChart.vue:60` | `uni.setStorageSync('token')` 明文持久化一年期令牌(H5 端即 localStorage,XSS 可窃取);且 LineChart 只在 `onLoad` 读一次,直接启动/存储被清时 token 为空、请求静默失败。建议:token 不落地,改内存传递或每页重建,并配合 N6 的错误处理 |
+| M6 | 折线图页标题为空 | `APP程序/pages.json:13` | `navigationBarTitleText` 为空串,`globalStyle` 里还留默认 "uni-app" 标题。建议:补齐页面标题 |
+| M7 | 小程序关闭域名校验 | `APP程序/manifest.json:58-60` | `mp-weixin.setting.urlCheck: false` 属开发期便利配置,按微信小程序发布存在合规风险(与 N5 的 mp 环境不兼容叠加)。建议:发布前开启并配置合法域名 |
+| M8 | 注释/调试残留 | `index.vue:42/50/120` | "二氧化碳设备卡片"实为烟雾浓度、`:50` 注释写湿度实为 MQ2;每 3 秒 `console.log(res.data)` 调试残留。建议:修正注释、删除调试输出 |
+| M9 | `led`/`onLedSwitch` 死代码 | `index.vue:79/137-157` | data 与方法在模板中无任何绑定组件(P0-1 补充,此前仅指出"无对应 UI")。建议:删除或补全 UI |
+
+> M5(澄清,非问题):`key.js` 的 HMAC-SHA1 签名与 OneNET token 算法(v2018-10-31:base64 解码 key → HMAC → base64 → urlencode 拼装)逐步比对**实现正确**,无新增签名 bug;问题仍仅限 N5 的运行环境依赖与固定一年有效期。
 
 ### 建议修复顺序
 
-1. **P0 全部 5 项** — 投入小,立刻恢复核心功能(远程控制、图表数据、在线状态、定时器)
-2. **P1 第 1、2 项** — 断线重连 + MQTT 心跳,是设备长期挂网的底线
-3. **P2 第 1 项** — 至少先轮换密钥并把硬编码凭据移出仓库
-4. 其余项随日常维护逐步处理
+1. **先确认硬件接线与有效电平**:MQ-2 实际 ADC 引脚、按键接法、蜂鸣器触发电平;然后优先修 **N1/N2/N3/N4**
+2. **P0 全部 5 项 + X1 + X6** — 投入小,打通远程控制链路(解析轮询 + 订阅 + 判空),恢复图表数据/在线状态/定时器;APP 侧顺手修 **M1/M3** 让图表页真正可用
+3. **P1 第 1、2 项 + X2/X3/X4/X5/X7** — 断线重连 + MQTT 心跳 + 串口/缓冲/看门狗,是设备长期挂网的底线
+4. **P2 第 1 项 + N5 + M4** — 至少先轮换密钥并把硬编码凭据移出仓库,APP token 改由后端签发或换纯 JS 实现、不落地存储
+5. **N6/N7/N8/N9 + X9/X10/X11** — 统一 APP API 错误处理,修 MQTT topic 硬编码、协议解析器与缓冲区隐患
+6. **X8 尽早单独处理** — 补齐 `.ioc` 引脚配置并把用户代码移入 USER CODE 段,避免 CubeMX 重新生成时静默丢代码
+7. 其余项随日常维护逐步处理
 
 ## 修复记录
 
