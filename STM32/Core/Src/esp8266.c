@@ -3,21 +3,19 @@
 
 #include "main.h"
 #include "usart.h"
+#include "net_config.h"
 
 
 //C库
 #include <string.h>
 #include <stdio.h>
-#include <dht11.h>
-
-#define ESP8266_WIFI_INFO		"AT+CWJAP=\"gx\",\"12345678\"\r\n"
 
 #define ESP8266_ONENET_INFO		"AT+CIPSTART=\"TCP\",\"mqtts.heclouds.com\",1883\r\n"
 
 
 unsigned char esp8266_buf[128];
 unsigned short esp8266_cnt = 0, esp8266_cntPre = 0;
-extern uint8_t Data[5];
+static uint8_t esp8266_link_lost = 0;
 
 
 void Usart_SendString(UART_HandleTypeDef *huart, unsigned char *str, unsigned short len)
@@ -182,6 +180,105 @@ void usart1_Printf(uint8_t *format)
 
 	HAL_UART_Transmit(&huart1,format,20,0xFFFF);
 
+}
+
+//==========================================================
+//	函数名称：	ESP8266_LinkLost
+//
+//	函数功能：	被动检测连接是否断开
+//
+//	入口参数：	无
+//
+//	返回参数：	1-已断开	0-正常
+//
+//	说明：		ESP8266 在 TCP 关闭 / WiFi 掉线时会主动上报
+//				CLOSED / WIFI DISCONNECT 等关键词,扫描接收缓存即可发现
+//==========================================================
+uint8_t ESP8266_LinkLost(void)
+{
+	if(esp8266_link_lost)
+		return 1;
+
+	if(strstr((char *)esp8266_buf, "CLOSED") != NULL ||
+	   strstr((char *)esp8266_buf, "WIFI DISCONNECT") != NULL ||
+	   strstr((char *)esp8266_buf, "WIFI LOST") != NULL ||
+	   strstr((char *)esp8266_buf, "UNLINK") != NULL)
+	{
+		esp8266_link_lost = 1;
+		ESP8266_Clear();
+	}
+
+	return esp8266_link_lost;
+}
+
+//==========================================================
+//	函数名称：	ESP8266_ResetLinkLost
+//
+//	函数功能：	清除断线标志
+//
+//	入口参数：	无
+//
+//	返回参数：	无
+//
+//	说明：		重连成功后调用
+//==========================================================
+void ESP8266_ResetLinkLost(void)
+{
+	esp8266_link_lost = 0;
+	ESP8266_Clear();
+}
+
+//==========================================================
+//	函数名称：	ESP8266_Reconnect
+//
+//	函数功能：	自动重连 WiFi 与 TCP
+//
+//	入口参数：	无
+//
+//	返回参数：	0-成功	1-失败
+//
+//	说明：		先尝试仅重连 TCP,失败后再重连 WiFi,避免无谓的长时间阻塞
+//==========================================================
+uint8_t ESP8266_Reconnect(void)
+{
+	uint8_t i = 0;
+
+	ESP8266_Clear();
+
+	printf("ESP8266 Reconnect...\r\n");
+
+	ESP8266_SendCmd("AT+CIPCLOSE\r\n", "OK");					//关闭可能残留的连接
+
+	for(i = 0; i < 3; i++)
+	{
+		if(ESP8266_SendCmd(ESP8266_ONENET_INFO, "CONNECT") == 0)
+		{
+			printf("TCP Reconnect OK\r\n");
+			return 0;
+		}
+		HAL_Delay(500);
+	}
+
+	printf("Rejoin WiFi...\r\n");
+	for(i = 0; i < 3; i++)
+	{
+		if(ESP8266_SendCmd(ESP8266_WIFI_INFO, "GOT IP") == 0)
+			break;
+		HAL_Delay(500);
+	}
+
+	for(i = 0; i < 3; i++)
+	{
+		ESP8266_SendCmd("AT+CIPCLOSE\r\n", "OK");
+		if(ESP8266_SendCmd(ESP8266_ONENET_INFO, "CONNECT") == 0)
+		{
+			printf("TCP Reconnect OK\r\n");
+			return 0;
+		}
+		HAL_Delay(500);
+	}
+
+	return 1;
 }
 //==========================================================
 //	函数名称：	ESP8266_Init

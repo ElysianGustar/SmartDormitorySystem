@@ -51,6 +51,13 @@
 			    <view class="dev-data">{{MQ2}}ppm</view>
 			</view>
 		
+			<!-- 远程控制卡片:开关下发 led 属性(设备端映射为蜂鸣器 PB10) -->
+			<view class="dev-cart control-card">
+			    <view class="">
+			        <view class="dev-name">远程蜂鸣器</view>
+			    </view>
+			    <switch :checked="led" color="#1890FF" @change="onLedSwitch" />
+			</view>
 			
         </view>
     </view>
@@ -60,10 +67,9 @@
 <script>
     // 引入创建令牌的函数
     const { createCommonToken } = require('@/key.js')
-	
-	const my_product_id = "xUHsdh4wh3" //填自己产品号
-	const my_device_name = "test"	//填自己设备号
-	
+    // 统一配置(产品号 / 设备号 / 凭据)
+    const config = require('@/config.js')
+
     export default {
         data() {
             return {
@@ -75,32 +81,46 @@
                 humi: '',
                 // 二氧化碳
                 MQ2: '',
-                // 台灯状态
-                led: true,
+                // 远程控制开关状态
+                led: false,
                 // 认证令牌
                 token: '',
                 // 最后更新时间
                 lastUpdateTime: 0,
+                // 定时器ID
+                timer: null,
             }
         },
         onLoad() {
             // 页面加载时生成认证令牌
             const params = {
-				// 填自己用户秘钥
-                author_key: '6Uk9bp+mybiZ2++0APrIbJnp7rdS8cSMj/klPJ1W26sWKBySRWJyrPRstVdJav6/',
-				// 版本号不用改
+                author_key: config.author_key,
                 version: '2022-05-01',
-				// 填自己用户id
-                user_id: '426241',
+                user_id: config.user_id,
             }
             this.token = createCommonToken(params);
         },
         onShow() {
-            // 页面显示时，首次和定时获取设备数据
+            // 页面显示时,首次和定时获取设备数据
             this.fetchDevData();
-            setInterval(()=>{
-                this.fetchDevData();
-            }, 3000) // 每3秒刷新一次数据
+            if (!this.timer) {
+                this.timer = setInterval(()=>{
+                    this.fetchDevData();
+                }, 3000) // 每3秒刷新一次数据
+            }
+        },
+        onHide() {
+            // 页面隐藏时清理定时器,避免与折线图页累计重复请求
+            if (this.timer) {
+                clearInterval(this.timer);
+                this.timer = null;
+            }
+        },
+        onUnload() {
+            if (this.timer) {
+                clearInterval(this.timer);
+                this.timer = null;
+            }
         },
         methods: {
             // 获取设备数据的方法
@@ -109,22 +129,42 @@
                     url: 'https://iot-api.heclouds.com/thingmodel/query-device-property', // 示例接口地址
                     method: 'GET',
                     data: {
-                        product_id: my_product_id,
-                        device_name: my_device_name
+                        product_id: config.product_id,
+                        device_name: config.device_name
                     },
                     header: {
                         'authorization': this.token // 使用认证令牌
                     },
                     success: (res) => {
-                        // 更新温度、湿度和台灯状态数据
-                        console.log(res.data);
-                        this.temp = res.data.data[2].value;
-                        this.humi = res.data.data[1].value;
-                        this.MQ2 = res.data.data[0].value;
-                        // 更新最后刷新时间
-                        this.lastUpdateTime = Date.now();
-                        // 判断设备是否在线（5分钟内有数据刷新则在线）
-                        this.isOnline = (Date.now() - this.lastUpdateTime) <= 300000;
+                        // 按 identifier 匹配属性,避免依赖返回顺序
+                        const body = res.data || {};
+                        const props = Array.isArray(body.data) ? body.data
+                                        : (Array.isArray(body.properties) ? body.properties : []);
+                        const getProp = (id) => {
+                            const item = props.find(p => p && p.identifier === id);
+                            return item ? item.value : '';
+                        };
+                        console.log('props', props);
+                        this.temp = getProp('temp');
+                        this.humi = getProp('humi');
+                        this.MQ2 = getProp('MQ2');
+
+                        // 在线判断:取各属性上报时间戳中的最新值,超过5分钟视为离线
+                        let lastTime = 0;
+                        props.forEach(p => {
+                            if (p && p.time !== undefined && p.time !== null && p.time !== '') {
+                                const t = parseInt(p.time, 10);
+                                if (t > lastTime) lastTime = t;
+                            }
+                        });
+                        if (lastTime > 0) {
+                            this.lastUpdateTime = lastTime;
+                            this.isOnline = (Date.now() - lastTime) <= 300000;
+                        } else {
+                            // 接口未返回时间戳时,降级为请求成功且有数据即视为在线
+                            this.lastUpdateTime = Date.now();
+                            this.isOnline = props.length > 0;
+                        }
                     },
                     fail: (err) => {
                         // 请求失败时设置设备为离线状态
@@ -133,16 +173,17 @@
                     }
                 });
             },
-            // 台灯状态改变时的处理方法
+            // 远程开关状态改变时的处理方法(下发 led 属性)
             onLedSwitch(event) {
                 console.log(event.detail.value);
                 let value = event.detail.value;
+                this.led = value;
                 uni.request({
                     url: 'https://iot-api.heclouds.com/thingmodel/set-device-property', // 示例接口地址
                     method: 'POST',
                     data: {
-                        product_id: my_product_id,
-                        device_name: my_device_name,
+                        product_id: config.product_id,
+                        device_name: config.device_name,
                         params: {
                             "led": value
                         }
@@ -204,6 +245,11 @@
 
     .status-card {
         background: linear-gradient(135deg, #ffffff 0%, #f5f5f5 100%);
+    }
+
+    .control-card {
+        justify-content: space-between;
+        padding: 0 40rpx;
     }
 
     .status-card.online {

@@ -100,25 +100,27 @@ SmartDormitorySystem/
 
 ### STM32 端配置
 
-1. 修改 `Core/Src/esp8266.c` 中的 WiFi 信息:
+1. 复制 `STM32/Core/Inc/net_config.h` 为同目录 `net_config.local.h`(已 git 忽略),填写 WiFi 与 OneNET 信息:
    ```c
-   #define ESP8266_WIFI_INFO  "AT+CWJAP=\"你的WiFi名\",\"密码\"\r\n"
+   // net_config.local.h
+   #define ESP8266_WIFI_INFO	"AT+CWJAP=\"你的WiFi名\",\"密码\"\r\n"
+   #define PROID     "产品ID"
+   #define AUTH_INFO "鉴权签名token"
+   #define DEVID     "设备名称"
    ```
-2. 修改 `Core/Src/onenet.c` 中的 OneNET 设备信息:
-   ```c
-   #define PROID      "产品ID"
-   #define AUTH_INFO  "鉴权token"
-   #define DEVID      "设备名称"
-   ```
-3. 用 Keil MDK-ARM 打开 `MDK-ARM` 下的工程,编译下载至开发板。
+2. 用 Keil MDK-ARM 打开 `MDK-ARM` 下的工程,编译下载至开发板。
 
 ### APP 端配置
 
-1. 修改 `pages/index/index.vue` 中的产品号、设备号与用户密钥:
+1. 复制 `APP程序/config.js` 为同目录 `config.local.js`(已 git 忽略),填写 OneNET 用户秘钥:
    ```js
-   const my_product_id = "产品ID"
-   const my_device_name = "设备名称"
-   // author_key / user_id 填入自己的 OneNET 用户信息
+   // config.local.js
+   module.exports = {
+       product_id: '产品ID',
+       device_name: '设备名称',
+       author_key: '你的用户秘钥',
+       user_id: '你的用户id'
+   }
    ```
 2. 使用 HBuilderX 打开 `APP程序` 目录,运行到浏览器 / 手机模拟器,或云打包生成 APK。
 
@@ -182,3 +184,39 @@ SmartDormitorySystem/
 2. **P1 第 1、2 项** — 断线重连 + MQTT 心跳,是设备长期挂网的底线
 3. **P2 第 1 项** — 至少先轮换密钥并把硬编码凭据移出仓库
 4. 其余项随日常维护逐步处理
+
+## 修复记录
+
+按上述顺序已完成以下修复:
+
+### P0 — 功能缺陷(已修复)
+
+| # | 修复内容 | 位置 |
+|---|---------|------|
+| 1 | 主循环轮询 `OneNet_RevPro`;连接成功后订阅 `thing/property/set` 与 `thing/property/desired/set`;`led` 属性下发执行至蜂鸣器 PB10,并回复 `set_reply`;APP 新增「远程蜂鸣器」开关 UI | `main.c`、`onenet.c`、`pages/index/index.vue` |
+| 2 | 设备配置收敛到 `APP程序/config.js`,主页与折线图页查询同一台设备 | `config.js`、`index.vue`、`LineChart.vue` |
+| 3 | 在线状态改为依据 OneNET 返回属性时间戳的最新值判断(>5 分钟视为离线),无时间戳时降级处理 | `index.vue` |
+| 4 | 定时器移到 `onShow` 且带判重,`onHide`/`onUnload` 清理,避免累积 | `index.vue`、`LineChart.vue` |
+| 5 | 数据解析改为按返回属性 `identifier`(`temp`/`humi`/`MQ2`)匹配 | `index.vue`、`LineChart.vue` |
+
+### P1 — 稳定性(已修复 1、2 项)
+
+| # | 修复内容 | 位置 |
+|---|---------|------|
+| 1 | 被动检测 `CLOSED`/`WIFI DISCONNECT` 等断线关键词,30s 后自动重连(关闭残留 TCP → 重连 WiFi/TCP → 重连 MQTT → 重新订阅) | `esp8266.c`、`onenet.c`、`main.c` |
+| 2 | 主循环每 60s 发送 MQTT PINGREQ 心跳(`OneNet_KeepAlive`) | `onenet.c`、`main.c` |
+
+### P2 — 安全(已修复第 1 项)
+
+| 修复内容 | 位置 |
+|---------|------|
+| 明文凭据移出源码:STM32 真值(产品 ID/鉴权签名/WiFi 密码)放入 git 忽略的 `net_config.local.h`;APP 真值(`author_key`/`user_id`)放入 git 忽略的 `config.local.js`;新增 `.gitignore` | `STM32/Core/Inc/net_config.h`、`APP程序/config.js`、`.gitignore` |
+
+> **重要**:以上真实凭据已进入 git 历史,仅移出源码不能消除历史泄露。请在 OneNET 控制台**轮换用户秘钥**,并更换 WiFi 密码,再在 `net_config.local.h` / `config.local.js` 中填入新值。
+
+### P3 — 工程质量(已修复部分,随前序一并处理)
+
+| 修复内容 | 位置 |
+|---------|------|
+| 已入库的 `unpackage/`(81 个构建产物)与 `STM32/MDK-ARM/road/`(Keil 输出)通过 `git rm --cached` 移出索引,新产物由 `.gitignore` 拦截 | `APP程序/unpackage/`、`STM32/MDK-ARM/` |
+| 清理 `Data[5]`、`a_esp_buf` 等从未定义/引用的遗留 extern 声明 | `onenet.c`、`main.c` |

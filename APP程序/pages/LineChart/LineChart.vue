@@ -10,6 +10,7 @@
 
 
 <script>
+	import config from '@/config.js'
 	export default {
 		data() {
 			return {
@@ -53,6 +54,8 @@
 				},
 				// 认证令牌
 				token: '',
+				// 定时器ID
+				timer: null,
 			}
 		},
 		onLoad(options) {
@@ -62,9 +65,24 @@
 		onShow() {
 			// 页面显示时获取设备数据，并设置2秒定时刷新数据
 			this.fetchDevData();
-			setInterval(() => {
-				this.fetchDevData();
-			}, 2000);
+			if (!this.timer) {
+				this.timer = setInterval(() => {
+					this.fetchDevData();
+				}, 2000);
+			}
+		},
+		onHide() {
+			// 页面隐藏时清理定时器,避免重复请求
+			if (this.timer) {
+				clearInterval(this.timer);
+				this.timer = null;
+			}
+		},
+		onUnload() {
+			if (this.timer) {
+				clearInterval(this.timer);
+				this.timer = null;
+			}
 		},
 		methods: {
 			// 获取设备数据的方法
@@ -73,13 +91,21 @@
 					url: 'https://iot-api.heclouds.com/thingmodel/query-device-property', // 示例接口地址
 					method: 'GET',
 					data: {
-						product_id: 'WN0YwGS4TQ',
-						device_name: 'd1'
+						product_id: config.product_id,
+						device_name: config.device_name
 					},
 					header: {
 						'authorization': this.token // 使用认证令牌
 					},
 					success: (res) => {
+						// 按 identifier 匹配属性,避免依赖返回顺序
+						const body = res.data || {};
+						const props = Array.isArray(body.data) ? body.data
+										: (Array.isArray(body.properties) ? body.properties : []);
+						const getProp = (id) => {
+							const item = props.find(p => p && p.identifier === id);
+							return item ? item.value : '';
+						};
 
 						let now = new Date();
 						let hours = now.getHours().toString().padStart(2, '0');
@@ -88,8 +114,8 @@
 						let currentTime = `${hours}:${minutes}:${seconds}`;
 
 						// 更新温度和湿度数据
-						this.temp = res.data.data[2].value;
-						this.humi = res.data.data[0].value;
+						this.temp = getProp('temp');
+						this.humi = getProp('humi');
 						// 限制数据点数量，避免数据过多
 						if (this.chartData.categories.length >= 10) {
 							this.chartData.categories.shift();

@@ -1,0 +1,26 @@
+# ===== 敏感信息(本地凭据,切勿提交) =====
+APP程序/config.local.js
+STM32/Core/Inc/net_config.local.h
+
+# ===== 构建产物 =====
+APP程序/unpackage/
+APP程序/.hbuilderx/
+STM32/MDK-ARM/road/
+STM32/MDK-ARM/Listings/
+STM32/MDK-ARM/Objects/
+*.axf
+*.hex
+*.bin
+*.map
+*.o
+*.d
+*.crf
+*.dep
+*.lst
+*.lnp
+*.uvguix.*
+
+# ===== IDE =====
+.idea/
+*.iml
+.vscode/

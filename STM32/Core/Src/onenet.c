@@ -9,21 +9,14 @@
 //#include "delay.h"
 //#include "led.h"
 #include "main.h"
+#include "net_config.h"
 #include "dht11.h"
 //C库
 #include <string.h>
 #include <stdio.h>
 
 
-#define PROID        "xUHsdh4wh3"
-
-#define AUTH_INFO    "version=2018-10-31&res=products%2FxUHsdh4wh3%2Fdevices%2Ftest&et=2058528898&method=md5&sign=yj4TmkDq7AGJcRp%2FZNZLFw%3D%3D"
-
-#define DEVID        "test"
-
-
 extern unsigned char esp8266_buf[128];
-extern uint8_t Data[5];
 extern uint8_t temp, humi;
 extern int smoke_value;
 
@@ -247,6 +240,127 @@ void OneNet_SendData(void)
 	
 }
 //==========================================================
+//	函数名称：	OneNet_ParseJsonProp
+//
+//	函数功能：	从 JSON 属性下发报文中解析指定键的值
+//
+//	入口参数：	payload：报文内容
+//				key：属性标识(如 "led")
+//
+//	返回参数：	-1-未找到	其他-解析出的数值(true=1, false=0)
+//
+//	说明：		
+//==========================================================
+static int OneNet_ParseJsonProp(const char *payload, const char *key)
+{
+	char buf[32];
+	char *p = NULL;
+
+	snprintf(buf, sizeof(buf), "\"%s\"", key);
+	p = strstr((char *)payload, buf);
+	if(p == NULL)
+		return -1;
+
+	p += strlen(buf);
+	p = strchr(p, ':');
+	if(p == NULL)
+		return -1;
+
+	p++;
+	while(*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n')
+		p++;
+
+	if(strncmp(p, "true", 4) == 0)
+		return 1;
+	if(strncmp(p, "false", 5) == 0)
+		return 0;
+
+	return atoi(p);
+}
+
+//==========================================================
+//	函数名称：	OneNet_ExecCommand
+//
+//	函数功能：	执行平台下发的控制命令
+//
+//	入口参数：	payload：命令内容
+//
+//	返回参数：	无
+//
+//	说明：		当前实现:led 属性下发直接控制蜂鸣器(PB10)
+//==========================================================
+static void OneNet_ExecCommand(const char *payload)
+{
+	int led = -1;
+
+	if(payload == NULL || payload[0] == 0)
+		return;
+
+	/* 物模型属性下发,格式为 {"params":{...,"led":1}} 或 {"led":1} */
+	led = OneNet_ParseJsonProp(payload, "led");
+	if(led >= 0)
+	{
+		HAL_GPIO_WritePin(GPIOB, GPIO_PIN_10, led ? GPIO_PIN_SET : GPIO_PIN_RESET);
+		printf("Remote Set led = %d\r\n", led);
+	}
+}
+
+//==========================================================
+//	函数名称：	OneNet_ReplyPropertySet
+//
+//	函数功能：	回复物模型属性设置结果
+//
+//	入口参数：	payload：收到的属性设置报文
+//
+//	返回参数：	无
+//
+//	说明：		
+//==========================================================
+static void OneNet_ReplyPropertySet(const char *topic, const char *payload)
+{
+	char reply_topic[64];
+	char reply[64];
+	char msgid[16] = "0";
+	char *p = NULL;
+	int i = 0;
+	MQTT_PACKET_STRUCTURE mqttPacket = {NULL, 0, 0, 0};
+
+	/* 提取上报报文中的 id,回复时原样带回 */
+	p = strstr((char *)payload, "\"id\"");
+	if(p != NULL)
+	{
+		p = strchr(p, ':');
+		if(p != NULL)
+		{
+			p++;
+			while(*p == ' ' || *p == '\t')
+				p++;
+			while(p[i] >= '0' && p[i] <= '9' && i < 15)
+			{
+				msgid[i] = p[i];
+				i++;
+			}
+			msgid[i] = 0;
+		}
+	}
+
+	if(strstr(topic, "/desired/") != NULL)
+		snprintf(reply_topic, sizeof(reply_topic), "$sys/%s/%s/thing/property/desired/set_reply", PROID, DEVID);
+	else
+		snprintf(reply_topic, sizeof(reply_topic), "$sys/%s/%s/thing/property/set_reply", PROID, DEVID);
+
+	snprintf(reply, sizeof(reply), "{\"id\":\"%s\",\"code\":200,\"msg\":\"success\",\"data\":{}}", msgid);
+
+	printf("Property Set Reply: %s\r\n", reply);
+
+	if(MQTT_PacketPublish(MQTT_PUBLISH_ID, reply_topic, reply, strlen(reply), MQTT_QOS_LEVEL0, 0, 0, &mqttPacket) == 0)
+	{
+		ESP8266_SendData(mqttPacket._data, mqttPacket._len);
+		MQTT_DeleteBuffer(&mqttPacket);
+	}
+}
+
+//==========================================================
 //	函数名称：	OneNet_RevPro
 //
 //	函数功能：	平台返回数据检测
@@ -259,135 +373,82 @@ void OneNet_SendData(void)
 //==========================================================
 void OneNet_RevPro(unsigned char *cmd)
 {
-	
-	MQTT_PACKET_STRUCTURE mqttPacket = {NULL, 0, 0, 0};								//协议包
-	
-	char *req_payload = NULL;
-	char *cmdid_topic = NULL;
-	
-	unsigned short req_len = 0;
-	
-	unsigned char type = 0;
-	
-	short result = 0;
+	unsigned char type = MQTT_UnPacketRecv(cmd);
 
-	char *dataPtr = NULL;
-	char numBuf[10];
-	int num = 0;
-	
-	type = MQTT_UnPacketRecv(cmd);
 	switch(type)
 	{
-		case MQTT_PKT_CMD:															//命令下发
-			
-			result = MQTT_UnPacketCmd(cmd, &cmdid_topic, &req_payload, &req_len);	//解出topic和消息体
-			if(result == 0)
+		case MQTT_PKT_CMD:									//旧版 $creq 命令下发
+		{
+			char *cmdid_topic = NULL;
+			char *req_payload = NULL;
+			unsigned short req_len = 0;
+			MQTT_PACKET_STRUCTURE mqttPacket = {NULL, 0, 0, 0};
+
+			if(MQTT_UnPacketCmd(cmd, &cmdid_topic, &req_payload, &req_len) == 0)
 			{
 				printf("cmdid: %s, req: %s, req_len: %d\r\n", cmdid_topic, req_payload, req_len);
-				
-				if(MQTT_PacketCmdResp(cmdid_topic, req_payload, &mqttPacket) == 0)	//命令回复组包
+
+				OneNet_ExecCommand(req_payload);
+
+				if(MQTT_PacketCmdResp(cmdid_topic, req_payload, &mqttPacket) == 0)
 				{
 					printf("Tips:	Send CmdResp\r\n");
-					
-					ESP8266_SendData(mqttPacket._data, mqttPacket._len);			//回复命令
-					MQTT_DeleteBuffer(&mqttPacket);									//删包
+					ESP8266_SendData(mqttPacket._data, mqttPacket._len);
+					MQTT_DeleteBuffer(&mqttPacket);
 				}
 			}
-		
+
+			MQTT_FreeBuffer(cmdid_topic);
+			MQTT_FreeBuffer(req_payload);
+		}
 		break;
-			
-		case MQTT_PKT_PUBACK:														//发送Publish消息，平台回复的Ack
-		
+
+		case MQTT_PKT_PUBLISH:								//物模型属性下发 thing/property/set
+		{
+			char *topic = NULL;
+			char *req_payload = NULL;
+			unsigned short topic_len = 0, payload_len = 0;
+			uint8 qos = 0;
+			uint16 pkt_id = 0;
+
+			if(MQTT_UnPacketPublish(cmd, &topic, &topic_len, &req_payload, &payload_len, &qos, &pkt_id) == 0)
+			{
+				if(strstr(topic, "property/set") != NULL)
+				{
+					printf("PropertySet: %s\r\n", req_payload);
+
+					OneNet_ExecCommand(req_payload);
+					OneNet_ReplyPropertySet(topic, req_payload);
+				}
+
+				if(qos == MQTT_QOS_LEVEL1)
+				{
+					MQTT_PACKET_STRUCTURE ackPacket = {NULL, 0, 0, 0};
+					if(MQTT_PacketPublishAck(pkt_id, &ackPacket) == 0)
+					{
+						ESP8266_SendData(ackPacket._data, ackPacket._len);
+						MQTT_DeleteBuffer(&ackPacket);
+					}
+				}
+			}
+
+			MQTT_FreeBuffer(topic);
+			MQTT_FreeBuffer(req_payload);
+		}
+		break;
+
+		case MQTT_PKT_PUBACK:								//发送Publish消息，平台回复的Ack
+		{
 			if(MQTT_UnPacketPublishAck(cmd) == 0)
 				printf("Tips:	MQTT Publish Send OK\r\n");
-			
+		}
 		break;
-		
+
 		default:
-			result = -1;
 		break;
 	}
-	
+
 	ESP8266_Clear();									//清空缓存
-	
-	if(result == -1)
-		return;
-	
-	dataPtr = strchr(req_payload, ':');					//搜索':'
-
-	if(dataPtr != NULL && result != -1)					//如果找到了
-	{
-		dataPtr++;
-		
-		while(*dataPtr >= '0' && *dataPtr <= '9')		//判断是否是下发的命令控制数据
-		{
-			numBuf[num++] = *dataPtr++;
-		}
-		numBuf[num] = 0;
-		
-		num = atoi((const char *)numBuf);				//转为数值形式
-		
-		if(strstr((char *)req_payload, "redled"))		//搜索"redled"
-		{
-			if(num == 1)								//控制数据如果为1，代表开
-			{
-				//Led5_Set(LED_ON);
-                printf("Led5_Set(LED_ON");
-			}
-			else if(num == 0)							//控制数据如果为0，代表关
-			{
-				//Led5_Set(LED_OFF);
-                printf("Led5_Set(LED_OFF");
-			}
-		}
-														//下同
-		else if(strstr((char *)req_payload, "greenled"))
-		{
-			if(num == 1)
-			{
-				//Led4_Set(LED_ON);
-                printf("Led4_Set(LED_ON");
-			}
-			else if(num == 0)
-			{
-				//Led4_Set(LED_OFF);
-                printf("Led4_Set(LED_OFF");
-			}
-		}
-		else if(strstr((char *)req_payload, "yellowled"))
-		{
-			if(num == 1)
-			{
-				//Led3_Set(LED_ON);
-                printf("Led3_Set(LED_ON");
-			}
-			else if(num == 0)
-			{
-				//Led2_Set(LED_OFF);
-                printf("Led2_Set(LED_OFF");
-			}
-		}
-		else if(strstr((char *)req_payload, "blueled"))
-		{
-			if(num == 1)
-			{
-				//Led2_Set(LED_ON);
-                printf("Led2_Set(LED_ON");
-			}
-			else if(num == 0)
-			{
-				//Led2_Set(LED_OFF);
-                printf("Led2_Set(LED_OFF");
-			}
-		}
-	}
-
-	if(type == MQTT_PKT_CMD || type == MQTT_PKT_PUBLISH)
-	{
-		MQTT_FreeBuffer(cmdid_topic);
-		MQTT_FreeBuffer(req_payload);
-	}
-
 }
 
 void OneNET_Publish(const char *topic, const char *msg)
@@ -412,17 +473,71 @@ void OneNET_Subscribe(void)
 	
 	MQTT_PACKET_STRUCTURE mqtt_packet = {NULL, 0, 0, 0};						//协议包
 	
-	char topic_buf[56];
-	const char *topic = topic_buf;
+	char topic_buf_1[64];
+	char topic_buf_2[64];
+	const char *topics[2];
 	
-	snprintf(topic_buf, sizeof(topic_buf), "$sys/%s/%s/thing/property/set", PROID, DEVID);
+	//物模型属性下发 topic 及期望属性下发 topic
+	snprintf(topic_buf_1, sizeof(topic_buf_1), "$sys/%s/%s/thing/property/set", PROID, DEVID);
+	snprintf(topic_buf_2, sizeof(topic_buf_2), "$sys/%s/%s/thing/property/desired/set", PROID, DEVID);
+	topics[0] = topic_buf_1;
+	topics[1] = topic_buf_2;
 	
-	printf("Subscribe Topic: %s\r\n", topic_buf);
+	printf("Subscribe Topics: %s, %s\r\n", topic_buf_1, topic_buf_2);
 	
-	if(MQTT_PacketSubscribe(MQTT_SUBSCRIBE_ID, MQTT_QOS_LEVEL0, &topic, 1, &mqtt_packet) == 0)
+	if(MQTT_PacketSubscribe(MQTT_SUBSCRIBE_ID, MQTT_QOS_LEVEL0, topics, 2, &mqtt_packet) == 0)
 	{
 		ESP8266_SendData(mqtt_packet._data, mqtt_packet._len);					//向平台发送订阅请求
 		
 		MQTT_DeleteBuffer(&mqtt_packet);										//删包
 	}
+}
+
+//==========================================================
+//	函数名称：	OneNet_KeepAlive
+//
+//	函数功能：	发送 MQTT 心跳包,防止空闲被服务器断开
+//
+//	入口参数：	无
+//
+//	返回参数：	无
+//
+//	说明：		
+//==========================================================
+void OneNet_KeepAlive(void)
+{
+	MQTT_PACKET_STRUCTURE mqttPacket = {NULL, 0, 0, 0};
+
+	if(MQTT_PacketPing(&mqttPacket) == 0)
+	{
+		ESP8266_SendData(mqttPacket._data, mqttPacket._len);
+		printf("Tips:	MQTT PINGREQ Sent\r\n");
+		MQTT_DeleteBuffer(&mqttPacket);
+	}
+}
+
+//==========================================================
+//	函数名称：	OneNet_Reconnect
+//
+//	函数功能：	断线后自动重连(WiFi/TCP + MQTT + 重新订阅)
+//
+//	入口参数：	无
+//
+//	返回参数：	0-成功	1-失败
+//
+//	说明：		
+//==========================================================
+uint8_t OneNet_Reconnect(void)
+{
+	if(ESP8266_Reconnect() != 0)								//先恢复 TCP 连接
+		return 1;
+
+	if(OneNet_DevLink() != 0)									//重新 MQTT 接入
+		return 1;
+
+	OneNET_Subscribe();											//重新订阅属性下发
+	ESP8266_ResetLinkLost();									//清除断线标志
+
+	printf("OneNET Reconnect Success\r\n");
+	return 0;
 }

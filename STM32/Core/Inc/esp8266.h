@@ -19,5 +19,11 @@ unsigned char *ESP8266_GetIPD(unsigned short timeOut);
 
 void ESP8266_IRQHandler(void);
 
+uint8_t ESP8266_LinkLost(void);
+
+void ESP8266_ResetLinkLost(void);
+
+uint8_t ESP8266_Reconnect(void);
+
 
 #endif

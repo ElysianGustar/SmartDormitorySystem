@@ -30,6 +30,7 @@
 #include "HS_F04A.h"
 #include "OLED.h"
 #include "key.h"
+#include <string.h>
 #include <stdio.h>
 #ifdef __GNUC__
 #define PUTCHAR_PROTOTYPE int __io_putchar(int ch)
@@ -69,7 +70,6 @@ PUTCHAR_PROTOTYPE
 
 // esp8266通信
 extern unsigned short esp8266_cnt;
-extern unsigned char a_esp_buf;
 extern unsigned char esp8266_buf[128];
 
 uint8_t Uart2_RxData;
@@ -77,6 +77,9 @@ uint8_t temp, humi;
 uint8_t init_status = 0;
 int smoke_value = 0;
 Key_ID key;
+uint8_t need_reconnect = 0;
+uint32_t lastReconnTick = 0;
+uint32_t lastPingTick = 0;
 
 /* USER CODE END PV */
 
@@ -156,6 +159,9 @@ int main(void)
     if(!OneNet_DevLink()) {
         printf("OneNET Connect Success\r\n");
         init_status |= INIT_ONENET_SUCCESS;
+        
+        /* 订阅物模型属性下发,远程控制链路 */
+        OneNET_Subscribe();
     } else {
         printf("OneNET Connect Failed\r\n");
         while(1);
@@ -179,6 +185,8 @@ int main(void)
     HAL_GPIO_WritePin(GPIOB, GPIO_PIN_12, GPIO_PIN_SET);
     
     /* 主循环 */
+    lastReconnTick = HAL_GetTick();
+    lastPingTick = HAL_GetTick();
     while (1)
     {
         /* 按键控制蜂鸣器 */
@@ -194,12 +202,36 @@ int main(void)
             HS_F04A_Ctrl(MOTOR_STOP);
         }
 
-        
-        /* 定期检查系统状态 */
-        if(++timeCount >= 100) {
-            if((init_status & INIT_ALL_SUCCESS) != INIT_ALL_SUCCESS) {
-                printf("System status error: 0x%02X\r\n", init_status);
+        /* 轮询 OneNET 下发数据(命令 / 物模型属性设置) */
+        if(ESP8266_WaitRecive() == REV_OK)
+        {
+            if(ESP8266_LinkLost())
+            {
+                printf("Link Lost\r\n");
+                need_reconnect = 1;
             }
+            else
+            {
+                unsigned char *ipd = (unsigned char *)strstr((char *)esp8266_buf, "IPD,");
+                if(ipd != NULL)
+                {
+                    ipd = (unsigned char *)strchr((char *)ipd, ':');
+                    if(ipd != NULL)
+                        OneNet_RevPro(ipd + 1);
+                    else
+                        ESP8266_Clear();
+                }
+                else
+                {
+                    ESP8266_Clear();
+                }
+            }
+        }
+
+        /* 每秒周期:采集传感器数据并上报 */
+        if(++timeCount >= 100)
+        {
+            timeCount = 0;
             
             /* 获取传感器数据 */
             if(DHT11_Read_Data(&temp, &humi) == 0) {    // 读取温度、湿度值
@@ -231,8 +263,24 @@ int main(void)
             } else {
                 printf("DHT11 Read Error\r\n");
             }
-            timeCount = 0;
         }
+
+        /* 断线自动重连(间隔至少 30s 尝试一次) */
+        if(need_reconnect && (HAL_GetTick() - lastReconnTick) >= 30000)
+        {
+            printf("OneNET Reconnecting...\r\n");
+            if(OneNet_Reconnect() == 0)
+                need_reconnect = 0;
+            lastReconnTick = HAL_GetTick();
+        }
+
+        /* MQTT 心跳:每 60s 发送 PINGREQ,防止空闲被服务器断开 */
+        if((HAL_GetTick() - lastPingTick) >= 60000)
+        {
+            OneNet_KeepAlive();
+            lastPingTick = HAL_GetTick();
+        }
+
         HAL_Delay(10);
     }
 }
