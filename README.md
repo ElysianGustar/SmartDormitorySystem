@@ -137,7 +137,7 @@ SmartDormitorySystem/
 
 ## 待优化项记录
 
-> 说明:以下为代码评审发现的优化点,按优先级 P0(功能缺陷)→ P1(稳定性)→ P2(安全)→ P3(工程质量)排序,均已定位到具体文件与代码位置,尚未修改。
+> 说明:以下为代码评审发现的优化点,按优先级 P0(功能缺陷)→ P1(稳定性)→ P2(安全)→ P3(工程质量)排序,均已定位到具体文件与代码位置。其中标注的这些项在发现时尚未修改,后续部分已在下方「修复记录」中修复,仍存在的项以现状为准。
 
 ### P0 — 功能缺陷(影响核心功能)
 
@@ -201,18 +201,18 @@ SmartDormitorySystem/
 
 ### 补充新发现（三次走查，尚未修改）
 
-> 说明:以下为对既有清单逐条复核(结论:28 项全部仍存在、零修复)之外新发现的问题,STM32 端 X 系列、APP 端 M 系列。另经实测确认:`unpackage/` 入库 51MB(3 个 APK 约 46MB),仓库无 `.gitignore`(已并入 P3-5)。
+> 说明:以下为对既有清单逐条复核之外新发现的问题,STM32 端 X 系列、APP 端 M 系列。注意:该次复核结论("零修复")反映的是**修复实施前**的代码状态,后续经 `a788a1d`、`dc6203e` 两次提交后,既有 28 项中已有 15+ 项修复(见下方「修复记录」),且本次走查所列 X1、X6 已随 P0-1 一并解决,请勿据此误判现状。另经实测确认:`unpackage/` 入库 51MB(3 个 APK 约 46MB),仓库原本无 `.gitignore`(已通过 P3 修复补齐)。
 
 #### STM32 端
 
 | # | 问题 | 位置 | 说明与建议 |
 |---|------|------|-----------|
-| X1 | 订阅函数从未调用,下行链路第二处断点 | `STM32/Core/Src/onenet.c:410` | `OneNET_Subscribe()` 定义后从未被调用(map 确认被剔除),即使修复 P0-1 轮询解析,设备也未订阅 `thing/property/set`。建议:MQTT 连接成功后调用订阅,与 P0-1 一并修复 |
+| X1 | 订阅函数从未调用,下行链路第二处断点 | `STM32/Core/Src/onenet.c:410` | `OneNET_Subscribe()` 定义后从未被调用(map 确认被剔除),即使修复 P0-1 轮询解析,设备也未订阅 `thing/property/set`。建议:MQTT 连接成功后调用订阅,与 P0-1 一并修复。✅ **已随 P0-1 修复**:`main.c:172` 连接成功后已调用 `OneNET_Subscribe()` |
 | X2 | DHT11 校验失败静默沿用旧值 | `STM32/Core/Src/Dht11.c:181-188` | 校验和失败无 `else` 分支,函数仍返回 0,temp/humi 保留上周期旧值却按成功上报/显示,故障无感知(与 N3 叠加)。建议:校验失败返回非 0,调用方据返回值决定上报策略 |
 | X3 | 无 UART 错误回调,接收通道可永久失效 | `STM32/Core/Src/main.c:93-104` | 仅实现 `HAL_UART_RxCpltCallback`,未实现 `HAL_UART_ErrorCallback`,USART2 发生 ORE/帧错误后 HAL 停止接收且无人重启。建议:实现错误回调,清除错误标志并重启 `HAL_UART_Receive_IT` |
 | X4 | ESP8266 接收变量缺 `volatile` 且无互斥 | `STM32/Core/Src/esp8266.c:18-19`、`main.c:97-102` | ISR 写 `esp8266_buf`/`esp8266_cnt`,主循环 `ESP8266_Clear()` 清零,无 `volatile` 无互斥,存在丢字节、索引错乱、strstr 扫描中被改写的竞态。建议:加 `volatile`,清零时短暂关中断或改双缓冲 |
 | X5 | 接收缓冲 128B 回绕 + `strstr` 越界读 | `main.c:73/97-100`、`esp8266.c:94` | 缓冲满时 `esp8266_cnt=0` 直接回绕致新旧帧混杂;缓冲全满无 NUL 结尾,`strstr` 越界读;AT 回显+IPD 突发易超 128B。建议:扩大缓冲、始终保证 NUL 结尾,或改环形队列 |
-| X6 | `OneNet_RevPro` PUBACK 分支空指针解引用 | `onenet.c:299-316` | PUBACK 分支不设置 `result=-1`,`req_payload` 仍为 NULL 即进入 `strchr(req_payload,':')`,P0-1 修复后立即变 HardFault。建议:进入解析前先判空 |
+| X6 | `OneNet_RevPro` PUBACK 分支空指针解引用 | `onenet.c:299-316` | PUBACK 分支不设置 `result=-1`,`req_payload` 仍为 NULL 即进入 `strchr(req_payload,':')`,P0-1 修复后立即变 HardFault。建议:进入解析前先判空。✅ **已随 P0-1 修复**:PUBACK 现为独立 case(`onenet.c:341-346`),仅断言 `MQTT_UnPacketPublishAck` 返回值,不再解析 NULL 载荷 |
 | X7 | 全工程无看门狗 | `main.c:161/175`、`Error_Handler`、`ESP8266_Init` 重试环 | IWDG 未启用,而卡死点全是 `while(1)`,无人值守设备死机需现场断电。建议:启用 IWDG 并在主循环喂狗 |
 | X8 | `.ioc` 引脚缺失 + 用户代码写在生成区 | `STM32/road.ioc`、`gpio.c:54` | PB10(蜂鸣器)、PB13(风扇 IN_B)、PB14/15(按键)、PB11(DHT11)、PB6/7(OLED 电源)均不在 `.ioc` 中,且蜂鸣器初始电平写在 CubeMX 生成区(非 USER CODE 段),重新生成代码即静默丢失(比 N1/N2 范围更广)。建议:补齐 `.ioc` 配置,用户代码移入 USER CODE 段 |
 | X9 | `OneNet_FillBuf` 无长度检查 | `onenet.c:96-111/219` | 对 `buf[128]` 连续 `strcpy/strcat/sprintf`,当前约 90 字节侥幸安全,`smoke_value` 为 int 无范围约束,字段扩展或异常值即溢出。建议:改 `snprintf` 并检查剩余长度 |
